@@ -63,13 +63,6 @@ VALUES
 2);
 
 
--- CTL RULES
-
-INSERT INTO ctl_rule (pipeline_id, seq, rule_name, params_json)
-VALUES 
-('AV__GOLD__SAT_QOT_DED', 0, 'record_source', '{"value":"109","target":"REC_SRC_NM"}');
-
-
 -- CTL COLUMN MAP
 -- Not mapped (framework-managed): LD_DT, LD_END_DT, SRC_EXPRN_DT
 -- Not mapped (NULL per spec -> defaulted to NULL by schema alignment):
