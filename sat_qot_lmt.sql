@@ -1,0 +1,135 @@
+%sql
+WITH QOT_LMT_SRC AS
+(
+    SELECT
+        QL.LMT_AMT,
+        QL.LMT_TYPE,
+        QL.MQP_ENTITY_REFERENCE,
+        QL.MQP_DATE_MODIFIED,
+        QL.BTCH_ID,
+        QL.BTCH_DT,
+
+        LOWER(
+            CONCAT(
+                TRIM(CAST(QL.MQP_ENTITY_REFERENCE AS STRING)),
+                '_',
+                TRIM(CAST(QL.MQP_DATE_MODIFIED AS STRING))
+            )
+        ) AS STD_QOT_ID
+
+    FROM dsi_dev.silver_oct16.QOT_LMT QL
+
+    WHERE QL.MQP_ENTITY_REFERENCE IS NOT NULL
+      AND QL.MQP_DATE_MODIFIED IS NOT NULL
+),
+
+LINKED AS
+(
+    SELECT
+        HQ.QBE_HASH_QOT_ID,
+        QL.*
+
+    FROM QOT_LMT_SRC QL
+
+    INNER JOIN dsi_dev.adv_db_majescoic.HUB_QOT HQ
+        ON LOWER(TRIM(HQ.QOT_ID)) = QL.STD_QOT_ID
+       AND HQ.REC_SRC_NM = '109'
+
+    LEFT JOIN dsi_dev.adv_db_majescoic.SAT_QOT_LMT SQLMT
+        ON HQ.QBE_HASH_QOT_ID = SQLMT.QBE_HASH_QOT_ID
+       AND SQLMT.REC_SRC_NM = '109'
+
+    WHERE SQLMT.QBE_HASH_QOT_ID IS NULL
+),
+
+DEDUPED AS
+(
+    SELECT
+        L.*,
+
+        MAX(MQP_DATE_MODIFIED) OVER
+        (
+            PARTITION BY QBE_HASH_QOT_ID
+        ) AS MAX_DATE_MODIFIED,
+
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY QBE_HASH_QOT_ID
+            ORDER BY MQP_DATE_MODIFIED DESC
+        ) AS RN,
+
+        LAG(MQP_DATE_MODIFIED) OVER
+        (
+            PARTITION BY QBE_HASH_QOT_ID
+            ORDER BY MQP_DATE_MODIFIED DESC
+        ) AS PREV_MORE_RECENT_SRC_EFF_DT
+
+    FROM LINKED L
+),
+
+FINAL AS
+(
+    SELECT
+
+        D.QBE_HASH_QOT_ID,
+
+        D.LMT_TYPE AS LMT_TP_CD,
+
+        CURRENT_TIMESTAMP AS LD_DT,
+
+        D.MQP_ENTITY_REFERENCE AS REF_ID,
+
+        CASE
+            WHEN D.RN = 1 THEN NULL
+            ELSE D.MAX_DATE_MODIFIED
+        END AS LD_END_DT,
+
+        '109' AS REC_SRC_NM,
+
+        CAST(NULL AS STRING) AS LMT_DATA_TP_CD,
+
+        CAST(NULL AS STRING) AS LMT_BSIS_CD,
+
+        CAST(NULL AS STRING) AS LMT_APLY_TO_CD,
+
+        D.LMT_AMT AS LMT_AMT,
+
+        CAST(NULL AS STRING) AS LMT_CD,
+
+        D.MQP_DATE_MODIFIED AS SRC_EFF_DT,
+
+        CASE
+            WHEN D.RN = 1 THEN NULL
+            ELSE D.PREV_MORE_RECENT_SRC_EFF_DT
+        END AS SRC_EXPRN_DT,
+
+        0 AS ERR_FLG,
+
+        '0' AS ERR_CD,
+
+        D.BTCH_ID,
+
+        D.BTCH_DT
+
+    FROM DEDUPED D
+)
+
+SELECT
+    QBE_HASH_QOT_ID,
+    LMT_TP_CD,
+    LD_DT,
+    REF_ID,
+    LD_END_DT,
+    REC_SRC_NM,
+    LMT_DATA_TP_CD,
+    LMT_BSIS_CD,
+    LMT_APLY_TO_CD,
+    LMT_AMT,
+    LMT_CD,
+    SRC_EFF_DT,
+    SRC_EXPRN_DT,
+    ERR_FLG,
+    ERR_CD,
+    BTCH_ID,
+    BTCH_DT
+FROM FINAL;
