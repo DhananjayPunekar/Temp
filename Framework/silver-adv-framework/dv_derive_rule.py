@@ -391,6 +391,51 @@ def derive_plcy_id(df: DataFrame, target: str, args: dict) -> DataFrame:
     return derive_concat(df, target, local_args)
 
 
+def derive_coins_plcy_id(df: DataFrame, target: str, args: dict) -> DataFrame:
+    """
+    HUB_COINS_PLCY business key derivation.
+    Wraps derive_concat with normalize disabled (case preserved).
+
+    Args:
+      cols:      source columns to concat (typically ["RPEC_C_CARRIER","RPEC_C_QUOTA_POLICY_NUMBER","RPEC_ID"])
+      separator: concat separator (default "_")
+    """
+    local_args = dict(args or {})
+    local_args["normalize"] = False
+
+    return derive_concat(df, target, local_args)
+
+
+def derive_qot_id(df: DataFrame, target: str, args: dict) -> DataFrame:
+    """
+    HUB_QOT business key derivation.
+    Wraps derive_concat with normalize disabled (case preserved).
+
+    Args:
+      cols:      source columns to concat (typically ["MQP_ENTITY_REFERENCE","MQP_DATE_MODIFIED"])
+      separator: concat separator (default "_")
+    """
+    local_args = dict(args or {})
+    local_args["normalize"] = False
+
+    return derive_concat(df, target, local_args)
+
+
+def derive_oppty_id(df: DataFrame, target: str, args: dict) -> DataFrame:
+    """
+    HUB_OPPTY business key derivation.
+    Wraps derive_concat with normalize disabled (case preserved).
+
+    Args:
+      cols:      source columns to concat (typically ["MQP_C_OPPORTUNITY_ID", a hardcoded '1' suffix column])
+      separator: concat separator (default "_")
+    """
+    local_args = dict(args or {})
+    local_args["normalize"] = False
+
+    return derive_concat(df, target, local_args)
+
+
 def derive_undrly_plcy_id_ndyc(df: DataFrame, target: str, args: dict) -> DataFrame:
     """
     HUB_UNDRLY_PLCY NDYC (Excess) business key derivation.
@@ -427,6 +472,7 @@ def derive_insd_obj_id_bo(df, target, args):
     standard_cols = args.get("standard_cols", [])
     excess_cols = args.get("excess_cols", [])
     ev_cols = args.get("ev_cols", [])
+    ac_cols = args.get("ac_cols", [])
     separator = args.get("separator", "_")
 
     # Gate ID creation on true business data presence, not MQP-only tokens.
@@ -443,6 +489,14 @@ def derive_insd_obj_id_bo(df, target, args):
     ev_check_cols = args.get("ev_cols")
     if ev_check_cols is None:
         ev_check_cols = [c for c in ev_cols if isinstance(c, str) and c.upper().startswith("MLO_")]
+
+    # Airport (AC) pipelines key their presence off CCX_ (airport) columns, unless
+    # an explicit airport_condition SQL expression is supplied.
+    ac_check_cols = args.get("ac_check_cols")
+    if ac_check_cols is None:
+        ac_check_cols = [c for c in ac_cols if isinstance(c, str) and c.upper().startswith("CCX_")]
+
+    airport_condition = args.get("airport_condition")
 
     def _any_non_blank(col_names):
         cond = F.lit(False)
@@ -474,18 +528,21 @@ def derive_insd_obj_id_bo(df, target, args):
     standard_expr = F.concat_ws(separator, *_build_parts(standard_cols))
     excess_expr = F.concat_ws(separator, *_build_parts(excess_cols))
     ev_expr = F.concat_ws(separator, *_build_parts(ev_cols))
+    ac_expr = F.concat_ws(separator, *_build_parts(ac_cols))
 
-    # Route expression by YCMC/EV business-data presence.
+    # Route expression by YCMC/EV/AC business-data presence.
     has_ycmc_data = _any_non_blank(ycmc_check_cols)
     has_uivc_data = _any_non_blank(uivc_check_cols)
     has_ev_data = _any_non_blank(ev_check_cols)
+    # airport_condition (a SQL expression) takes precedence over column-presence inference.
+    has_ac_data = F.expr(airport_condition) if airport_condition else _any_non_blank(ac_check_cols)
 
-    # Priority order is configurable so callers can resolve ambiguity when a
-    # row unexpectedly has both YCMC (excess) and MLO (EV) data populated.
-    # Default keeps existing behavior: excess wins, then ev, then standard.
-    expr_by_name = {"excess": excess_expr, "ev": ev_expr, "standard": standard_expr}
-    flag_by_name = {"excess": has_ycmc_data, "ev": has_ev_data, "standard": F.lit(True)}
-    priority = args.get("priority", ["excess", "ev", "standard"])
+    # Priority order is configurable so callers can resolve ambiguity when a row
+    # unexpectedly has more than one path's data populated (e.g. AC shares
+    # MLO_LOCATION_NO with EV). Default: excess, then ac, then ev, then standard.
+    expr_by_name = {"excess": excess_expr, "ac": ac_expr, "ev": ev_expr, "standard": standard_expr}
+    flag_by_name = {"excess": has_ycmc_data, "ac": has_ac_data, "ev": has_ev_data, "standard": F.lit(True)}
+    priority = args.get("priority", ["excess", "ac", "ev", "standard"])
 
     routed = None
     for name in priority:
@@ -495,8 +552,8 @@ def derive_insd_obj_id_bo(df, target, args):
         routed = F.when(cond, val) if routed is None else routed.when(cond, val)
     routed = routed.otherwise(standard_expr)
 
-    # Build ID only when at least one YCMC/UIVC/EV business input exists.
-    result = F.when(has_ycmc_data | has_uivc_data | has_ev_data, routed).otherwise(F.lit(None))
+    # Build ID only when at least one YCMC/UIVC/EV/AC business input exists.
+    result = F.when(has_ycmc_data | has_uivc_data | has_ev_data | has_ac_data, routed).otherwise(F.lit(None))
 
     # Normalize if requested; restore the ISO timestamp 'T' separator that lower() lowercases.
     if args.get("normalize", False):
@@ -510,13 +567,18 @@ def derive_insd_obj_type_bo(df, target, args):
     risk_type_col = args.get("risk_type_col", "UIVC_C_INSURABLE_RISK_TYPE")
     excess_value = args.get("excess_value", "Excess_&_Surplus_Property")
     ev_value = args.get("ev_value","Location")
-    
+    airport_value = args.get("airport_value", "Property")
+    airport_condition = args.get("airport_condition", "CCX_AIRPORT_CODE IS NOT NULL")
+
     ycmc_present = _col_or_null(df, "YCMC_C_STATE_CODE").isNotNull()
     mlo_present = _col_or_null(df, "MLO_LOCATION_NO").isNotNull()
+    # Airport rows also populate MLO_LOCATION_NO, so check ac before ev.
+    ac_present = F.expr(airport_condition) if airport_condition else F.lit(False)
 
     return df.withColumn(
         target,
         F.when(ycmc_present, F.lit(excess_value))
+         .when(~ycmc_present & ac_present, F.lit(airport_value))
          .when(~ycmc_present & mlo_present, F.lit(ev_value))
          .otherwise(_col_or_null(df, risk_type_col))
     )
@@ -1477,6 +1539,9 @@ DERIVATIONS = {
     "derive_party_type": derive_party_type,
     "derive_concat": derive_concat,
     "derive_plcy_id": derive_plcy_id,
+    "derive_coins_plcy_id": derive_coins_plcy_id,
+    "derive_qot_id": derive_qot_id,
+    "derive_oppty_id": derive_oppty_id,
     "derive_undrly_plcy_id_ndyc": derive_undrly_plcy_id_ndyc,
     "derive_undrly_plcy_id_rpec": derive_undrly_plcy_id_rpec,
     "derive_insd_obj_id_bo": derive_insd_obj_id_bo,
