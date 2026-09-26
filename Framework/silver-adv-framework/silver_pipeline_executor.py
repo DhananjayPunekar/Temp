@@ -582,6 +582,13 @@ class PipelineExecutor:
             _log_schema(f"source_load:{alias}", df, cfg.get("pipeline_id"))
             _log_query_plan(f"source_load:{alias}", df, cfg.get("pipeline_id"))
 
+            # Soft-delete filter: only applies when the source physically carries DATE_DELETED.
+            _date_deleted_col = next((c for c in df.columns if c.lower() == "date_deleted"), None)
+            if _date_deleted_col:
+                df = df.filter(F.col(_date_deleted_col).isNull())
+                logger.info("[PipelineExecutor] DATE_DELETED filter applied for source '%s' (%s)", alias, source_ref)
+                self._log_count(f"After DATE_DELETED filter ({alias})", df, cfg.get("pipeline_id"))
+                
             # Apply pre_rules_json — runs per-source BEFORE the join.
             # Used to derive join keys (e.g. PRTY_ID) or filter a gold lookup
             # (e.g. HUB source filtered to PRTY_TP_CD = 'Person') so that
