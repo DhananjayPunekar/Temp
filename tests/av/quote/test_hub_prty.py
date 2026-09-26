@@ -14,6 +14,8 @@
 # MAGIC 2. The `LEFT JOIN hub_prty H ... WHERE H.QBE_HASH_PRTY_ID IS NULL` anti-join is removed.
 # MAGIC    After the load the hub is populated, so the anti-join would return no rows.
 # MAGIC
+# MAGIC The SQL's quote-only filter `MQP_PQB_FLAG = 'Q'` is kept as is.
+# MAGIC
 # MAGIC **Quote parties vs policy parties**: `av/policy/hub_prty.sql` loads the same `HUB_PRTY` (same `REC_SRC_NM`,
 # MAGIC same product) with `PRTY_ID` = the plain business name. Quote parties end in `_1`, so with the widget
 # MAGIC `only_quote_parties` = Y (default) the target scope is limited to `PRTY_ID` values ending in `_1`.
@@ -175,7 +177,7 @@ HASH_CHECK_EXPR = f"MD5(CONCAT_WS('_', CAST(PRTY_ID AS STRING), LOWER(TRIM(PRTY_
 
 
 # Source rows in scope of the SQL, before the soft-delete filter.
-SCOPE_WHERE = f"""S.BUSINESSNAME IS NOT NULL AND TRIM(S.BUSINESSNAME) <> '' AND S.PARTY_TYPE IS NOT NULL AND TRIM(S.PARTY_TYPE) <> '' AND S.MQP_PRODUCT_CODE = '{PRODUCT_CODE}'"""
+SCOPE_WHERE = f"""S.BUSINESSNAME IS NOT NULL AND TRIM(S.BUSINESSNAME) <> '' AND S.PARTY_TYPE IS NOT NULL AND TRIM(S.PARTY_TYPE) <> '' AND S.MQP_PRODUCT_CODE = '{PRODUCT_CODE}' AND S.MQP_PQB_FLAG = 'Q'"""
 
 # Expression per output column, as in the SQL.
 EXPR_BY_COL = {
