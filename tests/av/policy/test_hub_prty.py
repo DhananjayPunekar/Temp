@@ -13,7 +13,7 @@
 # MAGIC    soft-deleted rows before any join.
 # MAGIC
 # MAGIC **Note**: if other AV pipelines also load HUB_PRTY with `REC_SRC_NM = '109'`, their rows show up as
-# MAGIC unexpected rows in TC02 / TC07b / TC08b.
+# MAGIC unexpected rows in TC02 / TC06 / TC07b / TC08b.
 # MAGIC
 # MAGIC **Target scope**: `REC_SRC_NM = '109'` and, when the hub has `PART_COL`, `PART_COL = 'av'`
 # MAGIC (the hub merge key includes the partition columns, so each product keeps its own rows).
@@ -25,12 +25,12 @@
 # MAGIC | TC00 | Silver source carries `DATE_DELETED` (soft-delete rows excluded from expected) |
 # MAGIC | TC01 | Every SQL output column exists in the target |
 # MAGIC | TC02 | Record count match |
-# MAGIC | TC03 | No duplicates on `QBE_HASH_PRTY_ID` and on (`PRTY_ID`, `PRTY_TP_CD`) in the target scope |
+# MAGIC | TC03 | No duplicates on (`PRTY_ID`, `PRTY_TP_CD`) in the target scope |
 # MAGIC | TC04 | Mandatory columns are NOT NULL in the target |
 # MAGIC | TC05 | Constant values (`REC_SRC_NM`, `ERR_FLG`, `ERR_CD`) and spec-NULL columns |
-# MAGIC | TC06 | Hash integrity: `QBE_HASH_PRTY_ID = MD5(PRTY_ID || '_' || LOWER(PRTY_TP_CD) || '_109')` on every target row |
+# MAGIC | TC06 | Hash keys: the `QBE_HASH_PRTY_ID` values produced by the SQL equal those in the target: no more, no less (count and value). The only hash check. |
 # MAGIC | TC07 | Full-row reconciliation (EXCEPT ALL, both directions) |
-# MAGIC | TC08 | Key presence and column-level value match (joined on `QBE_HASH_PRTY_ID`) |
+# MAGIC | TC08 | Key presence and column-level value match (joined on `PRTY_ID`, `PRTY_TP_CD`) |
 # MAGIC | TC09 | No soft-deleted source row reaches the target |
 
 # COMMAND ----------
@@ -44,7 +44,6 @@ dbutils.widgets.text("silver_schema", "silver_oct16", "Silver schema")
 dbutils.widgets.text("gold_schema", "adv_db_majescoic", "Gold schema")
 dbutils.widgets.text("target_table", "HUB_PRTY", "Target (hub) table")
 dbutils.widgets.text("source_table", "party", "Silver source table")
-dbutils.widgets.text("rec_src_nm", "109", "REC_SRC_NM")
 dbutils.widgets.text("product_code", "AV", "Product code")
 dbutils.widgets.text("sample_rows", "20", "Sample rows to show on failure")
 dbutils.widgets.dropdown("fail_on_error", "Y", ["Y", "N"], "Fail notebook if any test fails")
@@ -54,7 +53,7 @@ SILVER        = f"{CATALOG}.{dbutils.widgets.get('silver_schema').strip()}"
 GOLD          = f"{CATALOG}.{dbutils.widgets.get('gold_schema').strip()}"
 TARGET_FQ     = f"{GOLD}.{dbutils.widgets.get('target_table').strip()}"
 SOURCE_FQ     = f"{SILVER}.{dbutils.widgets.get('source_table').strip()}"
-REC_SRC_NM    = dbutils.widgets.get("rec_src_nm").strip()
+REC_SRC_NM    = "109"   # always 109 in this scope (no widget)
 PRODUCT_CODE  = dbutils.widgets.get("product_code").strip()
 SAMPLE_ROWS   = int(dbutils.widgets.get("sample_rows") or 20)
 FAIL_ON_ERROR = dbutils.widgets.get("fail_on_error") == "Y"
@@ -80,11 +79,11 @@ NULL_COLS = []
 # LD_DT is CURRENT_TIMESTAMP at run time, so only NOT NULL is checked, never its value.
 RUNTIME_COLS = ["LD_DT"]
 
-# Columns validated row by row (TC07 / TC08).
-VALUE_COLS = [c for c in SQL_OUTPUT_COLS if c not in RUNTIME_COLS]
+# Columns validated row by row (TC07 / TC08). The hash column is checked only in TC06.
+VALUE_COLS = [c for c in SQL_OUTPUT_COLS if c not in RUNTIME_COLS + [HASH_KEY]]
 
 # Must never be NULL in the target.
-MANDATORY_COLS = [c for c in SQL_OUTPUT_COLS if c not in NULL_COLS]
+MANDATORY_COLS = [c for c in SQL_OUTPUT_COLS if c not in NULL_COLS + [HASH_KEY]]
 
 # COMMAND ----------
 
@@ -165,10 +164,10 @@ EXTRA_EXPRS = {
                    "ELSE S.PARTY_TYPE END"),
 }
 
-# TC03 unique keys (one business name can exist as both a Person and an Organization)
-# and TC06 hash recomputation on the target's own columns.
-UNIQUE_KEYS     = [[HASH_KEY], [ID_COL, "PRTY_TP_CD"]]
-HASH_CHECK_EXPR = f"MD5(CONCAT(CAST(PRTY_ID AS STRING), '_', LOWER(TRIM(PRTY_TP_CD)), '_{REC_SRC_NM}'))"
+# Business key of a hub row: one business name can exist with several party types.
+# Used for the TC03 duplicate check and the TC08 row matching (the hash is only used in TC06).
+BUSINESS_KEY = [ID_COL, "PRTY_TP_CD"]
+UNIQUE_KEYS  = [BUSINESS_KEY]
 
 
 # Source rows in scope of the SQL, before the soft-delete filter.
@@ -203,7 +202,7 @@ print(f"INFO: {n_del} source rows in scope have {DATE_DELETED_COL} set and are e
 # CONCAT returns NULL when PARTY_TYPE is NULL, so those rows get a NULL hash key in the SQL.
 # The framework drops rows with a NULL primary key, so they can never be loaded.
 n_null_type = expected_raw.filter(F.col(HASH_KEY).isNull()).count()
-print(f"INFO: {n_null_type} expected rows have a NULL {HASH_KEY} (PARTY_TYPE is NULL); they cannot be loaded and will fail TC02 / TC07a / TC08a.")
+print(f"INFO: {n_null_type} expected rows have a NULL {HASH_KEY} (PARTY_TYPE is NULL); they cannot be loaded and will fail TC02 / TC06 / TC07a / TC08a.")
 n_other_type = expected_raw.filter(~F.col("PRTY_TP_CD").isin("Person", "Organization")).count()
 print(f"INFO: {n_other_type} expected rows have a PARTY_TYPE other than Person / Organization (passed through as-is).")
 
@@ -260,11 +259,6 @@ act_cnt = actual_n.count()
 record("TC02", "Record count match", exp_cnt == act_cnt, expected=exp_cnt, actual=act_cnt,
        details=f"diff={act_cnt - exp_cnt}")
 
-exp_hash_cnt = expected_n.select(HASH_KEY).distinct().count()
-act_hash_cnt = actual_n.select(HASH_KEY).distinct().count()
-record("TC02b", f"Distinct {HASH_KEY} count match", exp_hash_cnt == act_hash_cnt,
-       expected=exp_hash_cnt, actual=act_hash_cnt)
-
 # COMMAND ----------
 
 # MAGIC %md ## TC03 - Duplicate check (a hub holds one row per key)
@@ -320,19 +314,26 @@ for c in NULL_COLS:
 
 # COMMAND ----------
 
-# MAGIC %md ## TC06 - Hash integrity
-# MAGIC Recomputes `MD5(PRTY_ID || '_' || LOWER(PRTY_TP_CD) || '_109')` from each target row's own columns.
+# MAGIC %md ## TC06 - Hash keys: SQL vs target (the only hash check)
+# MAGIC Every `QBE_HASH_PRTY_ID` produced by the SQL must be in the target, and the target must hold no other hash:
+# MAGIC no more, no less, compared as a multiset (count and value).
 
 # COMMAND ----------
 
-bad_hash = (actual_raw
-            .withColumn("RECOMPUTED_HASH", F.expr(HASH_CHECK_EXPR))
-            .select(*[c for c in VALUE_COLS if c in actual_raw.columns], "RECOMPUTED_HASH")
-            .filter(~F.col(HASH_KEY).cast("string").eqNullSafe(F.col("RECOMPUTED_HASH"))))
-n_bad_hash = bad_hash.count()
-record("TC06", f"{HASH_KEY} = {HASH_CHECK_EXPR}", n_bad_hash == 0, expected=0, actual=n_bad_hash)
-if n_bad_hash:
-    show_sample(bad_hash, "Target rows whose hash does not match their own key columns")
+exp_h = expected_n.select(HASH_KEY)
+act_h = actual_n.select(HASH_KEY)
+n_exp_h, n_act_h = exp_h.count(), act_h.count()
+hash_missing = exp_h.exceptAll(act_h)   # produced by the SQL, not in the target
+hash_extra   = act_h.exceptAll(exp_h)   # in the target, not produced by the SQL
+n_hash_missing, n_hash_extra = hash_missing.count(), hash_extra.count()
+record("TC06", f"{HASH_KEY}: SQL hashes = target hashes (count and value)",
+       n_exp_h == n_act_h and n_hash_missing == 0 and n_hash_extra == 0,
+       expected=n_exp_h, actual=n_act_h,
+       details=f"missing_in_target={n_hash_missing} extra_in_target={n_hash_extra}")
+if n_hash_missing:
+    show_sample(expected_n.join(hash_missing.distinct(), HASH_KEY, "inner"), f"{HASH_KEY} produced by the SQL but not in the target")
+if n_hash_extra:
+    show_sample(actual_n.join(hash_extra.distinct(), HASH_KEY, "inner"), f"{HASH_KEY} in the target but not produced by the SQL")
 
 # COMMAND ----------
 
@@ -356,38 +357,38 @@ if n_extra:
 
 # COMMAND ----------
 
-# MAGIC %md ## TC08 - Key presence and column-level value match (on `QBE_HASH_PRTY_ID`)
+# MAGIC %md ## TC08 - Key presence and column-level value match (on `PRTY_ID`, `PRTY_TP_CD`)
 
 # COMMAND ----------
 
-exp_keys = expected_n.select(HASH_KEY).distinct()
-act_keys = actual_n.select(HASH_KEY).distinct()
+exp_keys = expected_n.select(*BUSINESS_KEY).distinct()
+act_keys = actual_n.select(*BUSINESS_KEY).distinct()
 
-only_exp = exp_keys.join(act_keys, HASH_KEY, "left_anti")
-only_act = act_keys.join(exp_keys, HASH_KEY, "left_anti")
+only_exp = exp_keys.join(act_keys, BUSINESS_KEY, "left_anti")
+only_act = act_keys.join(exp_keys, BUSINESS_KEY, "left_anti")
 n_only_exp, n_only_act = only_exp.count(), only_act.count()
-record("TC08a", f"Every expected {HASH_KEY} found in target", n_only_exp == 0, expected=0, actual=n_only_exp)
-record("TC08b", f"Every target {HASH_KEY} found in expected", n_only_act == 0, expected=0, actual=n_only_act)
+record("TC08a", f"Every expected {BUSINESS_KEY} found in target", n_only_exp == 0, expected=0, actual=n_only_exp)
+record("TC08b", f"Every target {BUSINESS_KEY} found in expected", n_only_act == 0, expected=0, actual=n_only_act)
 if n_only_exp:
-    show_sample(expected_n.join(only_exp, HASH_KEY, "inner").select(*VALUE_COLS), "Keys only in expected")
+    show_sample(only_exp, "Keys only in expected")
 if n_only_act:
-    show_sample(actual_n.join(only_act, HASH_KEY, "inner").select(*VALUE_COLS), "Keys only in target")
+    show_sample(only_act, "Keys only in target")
 
-non_key_cols = [c for c in VALUE_COLS if c != HASH_KEY]
-e = expected_n.select(HASH_KEY, *[F.col(c).alias(f"EXP__{c}") for c in non_key_cols])
-a = actual_n.select(HASH_KEY, *[F.col(c).alias(f"ACT__{c}") for c in non_key_cols])
-matched = e.join(a, HASH_KEY, "inner")
+non_key_cols = [c for c in VALUE_COLS if c not in BUSINESS_KEY]
+e = expected_n.select(*BUSINESS_KEY, *[F.col(c).alias(f"EXP__{c}") for c in non_key_cols])
+a = actual_n.select(*BUSINESS_KEY, *[F.col(c).alias(f"ACT__{c}") for c in non_key_cols])
+matched = e.join(a, BUSINESS_KEY, "inner")
 
 mismatch_counts = matched.select(*[
     F.sum((~F.col(f"EXP__{c}").eqNullSafe(F.col(f"ACT__{c}"))).cast("int")).alias(c) for c in non_key_cols
-]).first().asDict()
+]).first().asDict() if non_key_cols else {}
 
 for c in non_key_cols:
     n = mismatch_counts[c] or 0
     record("TC08", f"Value match - {c}", n == 0, expected=0, actual=n)
     if n:
         show_sample(matched.filter(~F.col(f"EXP__{c}").eqNullSafe(F.col(f"ACT__{c}")))
-                           .select(HASH_KEY, f"EXP__{c}", f"ACT__{c}"),
+                           .select(*BUSINESS_KEY, f"EXP__{c}", f"ACT__{c}"),
                     f"Mismatches in {c}")
 
 # COMMAND ----------
